@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>죽림고수 (화살 피하기)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1a1a; /* 기본 배경색 */
+            touch-action: none; /* 모바일에서 스크롤 방지 */
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* UI 레이어 뒤의 캔버스 클릭 가능하게 */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+        }
+        .ui-box {
+            pointer-events: auto; /* UI 요소는 클릭 가능하게 */
+        }
+        /* 대나무 배경 패턴 애니메이션 효과용 */
+        .bamboo-bg {
+            background-color: #8fbc8f;
+            background-image: repeating-linear-gradient(
+                90deg,
+                transparent,
+                transparent 50px,
+                rgba(34, 139, 34, 0.2) 50px,
+                rgba(34, 139, 34, 0.2) 60px
+            );
+        }
+    </style>
+</head>
+<body class="bamboo-bg text-gray-800">
+
+    <!-- 게임 캔버스 -->
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- UI 레이어 (시작, 게임오버 화면) -->
+    <div id="ui-layer">
+        
+        <!-- 현재 점수 (상단) -->
+        <div id="scoreDisplay" class="absolute top-4 right-4 text-2xl font-bold text-white drop-shadow-md hidden">
+            0.00초
+        </div>
+
+        <!-- 시작 화면 -->
+        <div id="startScreen" class="ui-box bg-white/90 p-8 rounded-xl shadow-2xl text-center max-w-sm mx-4 backdrop-blur-sm">
+            <h1 class="text-4xl font-extrabold text-green-800 mb-2">죽림고수</h1>
+            <p class="text-gray-600 mb-6 font-medium">쏟아지는 화살을 피하세요!</p>
+            
+            <div class="text-sm text-gray-700 mb-6 bg-green-50 p-4 rounded-lg text-left">
+                <strong>조작 방법:</strong><br>
+                💻 <strong>PC:</strong> 방향키 (←↑↓→) 또는 WASD<br>
+                📱 <strong>모바일:</strong> 화면 터치 후 드래그
+            </div>
+
+            <button id="startBtn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 active:scale-95 shadow-lg text-lg">
+                게임 시작
+            </button>
+        </div>
+
+        <!-- 게임 오버 화면 -->
+        <div id="gameOverScreen" class="ui-box bg-white/90 p-8 rounded-xl shadow-2xl text-center max-w-sm mx-4 backdrop-blur-sm hidden">
+            <h2 class="text-3xl font-bold text-red-600 mb-2">사망!</h2>
+            <p class="text-gray-600 mb-4">버틴 시간</p>
+            <div id="finalScore" class="text-5xl font-black text-gray-800 mb-6">0.00초</div>
+            
+            <button id="restartBtn" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-6 rounded-lg transition-transform transform hover:scale-105 active:scale-95 shadow-lg text-lg">
+                다시 도전
+            </button>
+        </div>
+
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // UI 요소들
+        const startScreen = document.getElementById('startScreen');
+        const gameOverScreen = document.getElementById('gameOverScreen');
+        const scoreDisplay = document.getElementById('scoreDisplay');
+        const finalScore = document.getElementById('finalScore');
+        const startBtn = document.getElementById('startBtn');
+        const restartBtn = document.getElementById('restartBtn');
+
+        // 캔버스 크기 설정
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // 게임 상태
+        let gameState = 'START'; // 'START', 'PLAYING', 'GAMEOVER'
+        let lastTime = 0;
+        let survivalTime = 0;
+        let animationId;
+
+        // 플레이어 객체
+        const player = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            radius: 8, // 피격 판정 범위 (작을수록 피하기 쉬움)
+            speed: 5, // 키보드 이동 속도
+            color: '#111827',
+            keys: {
+                w: false, a: false, s: false, d: false,
+                ArrowUp: false, ArrowLeft: false, ArrowDown: false, ArrowRight: false
+            },
+            touchTarget: null // 모바일 터치 목표 위치
+        };
+
+        // 화살 배열
+        let arrows = [];
+        let timeUntilNextSpawn = 0;
+        let spawnRate = 500; // 초기 스폰 주기 (ms)
+
+        // 키보드 이벤트 리스너
+        window.addEventListener('keydown', (e) => {
+            if (player.keys.hasOwnProperty(e.key)) {
+                player.keys[e.key] = true;
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            if (player.keys.hasOwnProperty(e.key)) {
+                player.keys[e.key] = false;
+            }
+        });
+
+        // 터치/마우스 이벤트 리스너 (모바일 및 드래그 지원)
+        function handlePointerMove(e) {
+            if (gameState !== 'PLAYING') return;
+            e.preventDefault(); // 스크롤 방지
+            
+            let clientX, clientY;
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            } else {
+                clientX = e.clientX;
+                clientY = e.clientY;
+            }
+            
+            player.touchTarget = { x: clientX, y: clientY };
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (e.buttons === 1) handlePointerMove(e); // 마우스 왼쪽 버튼 클릭 중일 때만
+        });
+        canvas.addEventListener('touchmove', handlePointerMove, { passive: false });
+        
+        canvas.addEventListener('touchend', () => { player.touchTarget = null; });
+        canvas.addEventListener('mouseup', () => { player.touchTarget = null; });
+        canvas.addEventListener('touchstart', handlePointerMove, { passive: false });
+        canvas.addEventListener('mousedown', handlePointerMove);
+
+        // 화살 생성 함수
+        function spawnArrow() {
+            const edge = Math.floor(Math.random() * 4); // 0: 위, 1: 오른쪽, 2: 아래, 3: 왼쪽
+            let startX, startY;
+
+            // 화면 밖에서 생성
+            const offset = 50; 
+            if (edge === 0) {
+                startX = Math.random() * canvas.width;
+                startY = -offset;
+            } else if (edge === 1) {
+                startX = canvas.width + offset;
+                startY = Math.random() * canvas.height;
+            } else if (edge === 2) {
+                startX = Math.random() * canvas.width;
+                startY = canvas.height + offset;
+            } else {
+                startX = -offset;
+                startY = Math.random() * canvas.height;
+            }
+
+            // 플레이어 방향으로 조준 + 약간의 오차 (흩뿌려짐 효과)
+            const dx = player.x - startX;
+            const dy = player.y - startY;
+            let angle = Math.atan2(dy, dx);
+            
+            // 생존 시간이 길어질수록 조준 오차가 줄어들어 더 날카로워짐
+            const spread = Math.max(0.1, 0.5 - (survivalTime * 0.01)); 
+            angle += (Math.random() - 0.5) * spread; 
+
+            // 속도: 기본 속도 + 생존 시간에 따른 증가
+            const baseSpeed = 3;
+            const speedVariance = Math.random() * 2;
+            const timeSpeedBonus = survivalTime * 0.1;
+            const speed = baseSpeed + speedVariance + timeSpeedBonus;
+
+            arrows.push({
+                x: startX,
+                y: startY,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                angle: angle,
+                radius: 4, // 화살촉 피격 판정
+                length: 25 // 화살 길이
+            });
+        }
+
+        // 게임 초기화
+        function initGame() {
+            player.x = canvas.width / 2;
+            player.y = canvas.height / 2;
+            player.touchTarget = null;
+            arrows = [];
+            survivalTime = 0;
+            spawnRate = 600; // 초기 스폰 속도 완화
+            lastTime = performance.now();
+            
+            startScreen.classList.add('hidden');
+            gameOverScreen.classList.add('hidden');
+            scoreDisplay.classList.remove('hidden');
+            
+            gameState = 'PLAYING';
+            animationId = requestAnimationFrame(gameLoop);
+        }
+
+        // 게임 종료
+        function gameOver() {
+            gameState = 'GAMEOVER';
+            scoreDisplay.classList.add('hidden');
+            gameOverScreen.classList.remove('hidden');
+            finalScore.innerText = survivalTime.toFixed(2) + "초";
+        }
+
+        // 업데이트 (논리 처리)
+        function update(deltaTime) {
+            // 1. 점수(시간) 업데이트
+            survivalTime += deltaTime / 1000;
+            scoreDisplay.innerText = survivalTime.toFixed(2) + "초";
+
+            // 2. 난이도 상승 (스폰 주기 감소)
+            // 시간이 지날수록 화살이 더 자주 나옴 (최소 한계치 50ms)
+            spawnRate = Math.max(50, 600 - (survivalTime * 15));
+
+            // 3. 화살 스폰 처리
+            timeUntilNextSpawn -= deltaTime;
+            if (timeUntilNextSpawn <= 0) {
+                // 한 번에 생성되는 화살 갯수도 시간에 따라 증가
+                const spawnCount = 1 + Math.floor(survivalTime / 15);
+                for(let i=0; i<spawnCount; i++){
+                    spawnArrow();
+                }
+                timeUntilNextSpawn = spawnRate;
+            }
+
+            // 4. 플레이어 이동
+            let dx = 0;
+            let dy = 0;
+
+            // 키보드 이동
+            if (player.keys.w || player.keys.ArrowUp) dy -= 1;
+            if (player.keys.s || player.keys.ArrowDown) dy += 1;
+            if (player.keys.a || player.keys.ArrowLeft) dx -= 1;
+            if (player.keys.d || player.keys.ArrowRight) dx += 1;
+
+            if (dx !== 0 || dy !== 0) {
+                // 대각선 이동 속도 보정
+                const length = Math.hypot(dx, dy);
+                player.x += (dx / length) * player.speed;
+                player.y += (dy / length) * player.speed;
+                player.touchTarget = null; // 키보드 입력 시 터치 타겟 취소
+            } 
+            // 터치/마우스 이동 (부드럽게 따라가기)
+            else if (player.touchTarget) {
+                const tDx = player.touchTarget.x - player.x;
+                const tDy = player.touchTarget.y - player.y;
+                const distance = Math.hypot(tDx, tDy);
+                
+                if (distance > player.speed) {
+                    player.x += (tDx / distance) * player.speed;
+                    player.y += (tDy / distance) * player.speed;
+                } else {
+                    player.x = player.touchTarget.x;
+                    player.y = player.touchTarget.y;
+                }
+            }
+
+            // 화면 밖으로 나가지 못하게 제한
+            player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+            player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+
+            // 5. 화살 이동 및 충돌 판정
+            for (let i = arrows.length - 1; i >= 0; i--) {
+                const arrow = arrows[i];
+                arrow.x += arrow.vx;
+                arrow.y += arrow.vy;
+
+                // 화면 밖으로 멀리 나간 화살 제거
+                const margin = 100;
+                if (arrow.x < -margin || arrow.x > canvas.width + margin ||
+                    arrow.y < -margin || arrow.y > canvas.height + margin) {
+                    arrows.splice(i, 1);
+                    continue;
+                }
+
+                // 충돌 판정 (원형 충돌) - 화살촉(머리) 기준으로 판정
+                // 화살의 맨 앞쪽 끝 좌표 계산
+                const tipX = arrow.x + Math.cos(arrow.angle) * (arrow.length / 2);
+                const tipY = arrow.y + Math.sin(arrow.angle) * (arrow.length / 2);
+
+                const distToPlayer = Math.hypot(player.x - tipX, player.y - tipY);
+                if (distToPlayer < player.radius + arrow.radius) {
+                    // 충돌!
+                    gameOver();
+                    break; // 게임 오버시 반복문 즉시 탈출
+                }
+            }
+        }
+
+        // 그리기
+        function draw() {
+            // 캔버스 비우기
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 화살 그리기
+            arrows.forEach(arrow => {
+                ctx.save();
+                ctx.translate(arrow.x, arrow.y);
+                ctx.rotate(arrow.angle);
+
+                // 화살대 (나무 막대)
+                ctx.beginPath();
+                ctx.moveTo(-arrow.length / 2, 0);
+                ctx.lineTo(arrow.length / 2 - 5, 0);
+                ctx.strokeStyle = '#8B4513'; // 갈색
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // 깃 (뒤쪽)
+                ctx.beginPath();
+                ctx.moveTo(-arrow.length / 2, 0);
+                ctx.lineTo(-arrow.length / 2 - 4, -3);
+                ctx.moveTo(-arrow.length / 2, 0);
+                ctx.lineTo(-arrow.length / 2 - 4, 3);
+                ctx.strokeStyle = '#FFF';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+
+                // 화살촉 (앞쪽 뾰족한 부분)
+                ctx.beginPath();
+                ctx.moveTo(arrow.length / 2 - 5, -3);
+                ctx.lineTo(arrow.length / 2, 0);
+                ctx.lineTo(arrow.length / 2 - 5, 3);
+                ctx.fillStyle = '#DC2626'; // 빨간색 촉
+                ctx.fill();
+
+                ctx.restore();
+
+                /* (디버깅용) 화살 피격 판정 원 그리기
+                ctx.beginPath();
+                ctx.arc(arrow.x + Math.cos(arrow.angle)*(arrow.length/2), arrow.y + Math.sin(arrow.angle)*(arrow.length/2), arrow.radius, 0, Math.PI * 2);
+                ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+                ctx.stroke();
+                */
+            });
+
+            // 플레이어 그리기 (고수 캐릭터 느낌)
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            
+            // 그림자
+            ctx.beginPath();
+            ctx.ellipse(0, 10, player.radius, player.radius/2, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fill();
+
+            // 몸통
+            ctx.beginPath();
+            ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+            ctx.fillStyle = player.color;
+            ctx.fill();
+            
+            // 머리띠 (빨간색)
+            ctx.beginPath();
+            ctx.arc(0, 0, player.radius, Math.PI, 0);
+            ctx.fillStyle = '#DC2626';
+            ctx.fill();
+
+            // 눈
+            ctx.fillStyle = 'white';
+            ctx.beginPath(); ctx.arc(-3, -1, 1.5, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(3, -1, 1.5, 0, Math.PI*2); ctx.fill();
+
+            // 피격 판정 범위 (디버깅용)
+            /*
+            ctx.beginPath();
+            ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = 'lime';
+            ctx.stroke();
+            */
+
+            ctx.restore();
+        }
+
+        // 메인 게임 루프
+        function gameLoop(timestamp) {
+            if (gameState !== 'PLAYING') return;
+
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // 최대 델타타임 제한 (탭 전환 등 방지용)
+            if (deltaTime < 100) {
+                update(deltaTime);
+            }
+            draw();
+
+            if (gameState === 'PLAYING') {
+                animationId = requestAnimationFrame(gameLoop);
+            }
+        }
+
+        // 버튼 이벤트 바인딩
+        startBtn.addEventListener('click', initGame);
+        restartBtn.addEventListener('click', initGame);
+
+    </script>
+</body>
+</html>
